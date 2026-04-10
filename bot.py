@@ -15,11 +15,11 @@ os.makedirs(INJECTOR_EXT_DIR, exist_ok=True)
 # ─── Accounts ─────────────────────────────────────────────────────
 # Add all your FIFA account email addresses here (one per line).
 FIFA_ACCOUNTS: list[str] = [
-    "account01@example.com",
-    "account02@example.com",
-    # … keep adding up to however many you have
+    "brandon8289@harmonyofcommunity.site",
+    "samantha5431@shereifandcompany.site",
+    # add more accounts below, one per line
 ]
-FIFA_PASSWORD: str = "YourSharedPasswordHere"
+FIFA_PASSWORD: str = "StrongPass123!"
 
 # ─── Shared page registry (filled by queue_farmer) ────────────────
 _pages: list        = []   # index == slot_id
