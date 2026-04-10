@@ -17,7 +17,29 @@ os.makedirs(INJECTOR_EXT_DIR, exist_ok=True)
 FIFA_ACCOUNTS: list[str] = [
     "brandon8289@harmonyofcommunity.site",
     "samantha5431@shereifandcompany.site",
-    # add more accounts below, one per line
+    "maya4978@shereifandcompany.site",
+    "aria1581@shereifandcompany.site",
+    "samantha5431@shereifandcompany.site",
+    "grace8673@shereifandcompany.site",
+    "andrew3104@shereifandcompany.site",
+    "violet5044@shereifandcompany.site",
+    "jason1149@shereifandcompany.site",
+    "jason7883@shereifandcompany.site",
+    "natalie4475@shereifandcompany.site",
+    "hazel5220@shereifandcompany.site",
+    "riley3892@shereifandcompany.site",
+    "hannah9632@shereifandcompany.site",
+    "luna7090@shereifandcompany.site",
+    "lucas3915@shereifandcompany.site",
+    "christopher9298@shereifandcompany.site",
+    "ryan1592@shereifandcompany.site",
+    "kennedy1134@shereifandcompany.site",
+    "andrew8256@shereifandcompany.site",
+    "nora2119@shereifandcompany.site",
+    "owen5336@shereifandcompany.site",
+    "sara1905@shereifandcompany.site",
+    "natalie2996@shereifandcompany.site",
+    "maya0260@shereifandcompany.site",
 ]
 FIFA_PASSWORD: str = "StrongPass123!"
 
