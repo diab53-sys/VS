@@ -309,9 +309,9 @@ async def auto_login_monitor():
                     if otp_found:
                         if slot_id not in _otp_waiting:
                             _otp_waiting.add(slot_id)
-                            _log(
-                                f"Slot #{slot_id}: OTP field detected — "
-                                "waiting for verification code from email"
+                            _log(f"Slot #{slot_id}: OTP field detected — fetching from email")
+                            asyncio.create_task(
+                                _auto_fill_otp(page, slot_id, account)
                             )
                         continue   # Do NOT re-submit the login form
 
@@ -358,3 +358,49 @@ async def auto_login_monitor():
             await asyncio.sleep(5)
 
     _log("auto_login_monitor: exited")
+
+
+# ─── Auto OTP filler ─────────────────────────────────────────────
+async def _auto_fill_otp(page, slot_id: int, account: str) -> None:
+    """Fetch OTP from Titan Email and type it into the browser."""
+    try:
+        from email_reader import fetch_otp
+
+        email_password = os.environ.get("EMAIL_PASSWORD", FIFA_PASSWORD)
+        _log(f"Slot #{slot_id}: fetching OTP for {account} via IMAP...")
+
+        otp = await fetch_otp(account, email_password, timeout_s=90)
+
+        if not otp:
+            _log(f"Slot #{slot_id}: OTP not found in email — manual solve needed")
+            _otp_waiting.discard(slot_id)
+            return
+
+        _log(f"Slot #{slot_id}: OTP retrieved — filling into browser")
+
+        if page.is_closed():
+            _otp_waiting.discard(slot_id)
+            return
+
+        # Fill OTP into whichever input field is visible
+        filled = False
+        for sel in _OTP_SELECTORS:
+            try:
+                el = await page.query_selector(sel)
+                if el:
+                    await page.fill(sel, otp)
+                    await asyncio.sleep(0.5)
+                    await page.keyboard.press("Enter")
+                    _log(f"Slot #{slot_id}: OTP submitted")
+                    filled = True
+                    break
+            except Exception:
+                continue
+
+        if not filled:
+            _log(f"Slot #{slot_id}: OTP field gone before fill — may have auto-submitted")
+
+    except Exception as e:
+        _log(f"Slot #{slot_id}: _auto_fill_otp error: {str(e)[:120]}")
+    finally:
+        _otp_waiting.discard(slot_id)
