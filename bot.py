@@ -19,7 +19,7 @@ FIFA_ACCOUNTS: list[str] = [
     "samantha5431@shereifandcompany.site",
     "maya4978@shereifandcompany.site",
     "aria1581@shereifandcompany.site",
-    "samantha5431@shereifandcompany.site",
+    "grace8673@shereifandcompany.site",
     "grace8673@shereifandcompany.site",
     "andrew3104@shereifandcompany.site",
     "violet5044@shereifandcompany.site",
@@ -241,12 +241,37 @@ async def _solve_datadome_interstitial(page, slot_id: int):
             await asyncio.sleep(5)
 
 
+# ─── OTP / verification state tracking ──────────────────────────
+_otp_waiting:        set[int]        = set()   # slots waiting for OTP email
+_last_login_attempt: dict[int, float] = {}     # slot_id -> timestamp of last submit
+
+# Selectors that indicate FIFA is waiting for an OTP / verification code
+_OTP_SELECTORS: tuple[str, ...] = (
+    'input[name*="otp" i]',
+    'input[name*="code" i]',
+    'input[autocomplete="one-time-code"]',
+    'input[placeholder*="code" i]',
+    'input[placeholder*="verification" i]',
+    'input[maxlength="6"][type="text"]',
+    'input[maxlength="6"][type="number"]',
+    'input[type="tel"][maxlength="6"]',
+)
+
+# How long to wait before re-submitting credentials (avoid hammering FIFA auth)
+_LOGIN_COOLDOWN_S: float = 60.0
+
+
 # ─── Auto-login monitor ───────────────────────────────────────────
 async def auto_login_monitor():
     """
     Long-running background task.
     Watches every page in _pages; when it detects the FIFA auth/login
     page it automatically fills credentials and submits.
+
+    Improvements:
+        - Detects OTP / verification-code fields and pauses (no re-submit)
+        - 60-second cooldown between credential submissions per slot
+        - Resets tracking when the slot leaves the login page
     """
     _log("auto_login_monitor: started")
     while True:
@@ -257,15 +282,48 @@ async def auto_login_monitor():
                     continue
                 try:
                     if page.is_closed():
+                        _otp_waiting.discard(slot_id)
+                        _last_login_attempt.pop(slot_id, None)
                         continue
+
                     url = page.url or ""
-                    if "auth.fifa.com" not in url and "social-login" not in url:
+                    on_login = "auth.fifa.com" in url or "social-login" in url
+
+                    if not on_login:
+                        # Left the login page — reset state
+                        _otp_waiting.discard(slot_id)
+                        _last_login_attempt.pop(slot_id, None)
                         continue
 
-                    account = _get_account(slot_id)
-                    _log(f"Slot #{slot_id}: login page detected — filling {account}")
+                    # ── Check for OTP / verification-code field ────
+                    otp_found = False
+                    for sel in _OTP_SELECTORS:
+                        try:
+                            el = await page.query_selector(sel)
+                            if el:
+                                otp_found = True
+                                break
+                        except Exception:
+                            pass
 
-                    # Email field
+                    if otp_found:
+                        if slot_id not in _otp_waiting:
+                            _otp_waiting.add(slot_id)
+                            _log(
+                                f"Slot #{slot_id}: OTP field detected — "
+                                "waiting for verification code from email"
+                            )
+                        continue   # Do NOT re-submit the login form
+
+                    # ── Cooldown: avoid re-submitting too fast ─────
+                    now = time.time()
+                    if now - _last_login_attempt.get(slot_id, 0) < _LOGIN_COOLDOWN_S:
+                        continue
+
+                    # ── Fill credentials and submit ────────────────
+                    account = _get_account(slot_id)
+                    _log(f"Slot #{slot_id}: login page — filling {account}")
+
                     email_sel = 'input[type="email"], input[name="email"], input[id*="email"]'
                     try:
                         await page.wait_for_selector(email_sel, timeout=5000)
@@ -273,14 +331,12 @@ async def auto_login_monitor():
                     except Exception:
                         pass
 
-                    # Password field
                     try:
                         await page.wait_for_selector('input[type="password"]', timeout=5000)
                         await page.fill('input[type="password"]', FIFA_PASSWORD)
                     except Exception:
                         pass
 
-                    # Submit
                     try:
                         submit_sel = 'button[type="submit"], input[type="submit"]'
                         try:
@@ -289,6 +345,8 @@ async def auto_login_monitor():
                             await page.keyboard.press("Enter")
                     except Exception:
                         pass
+
+                    _last_login_attempt[slot_id] = time.time()
 
                 except Exception as e:
                     _log(f"Slot #{slot_id}: login monitor error: {str(e)[:80]}")
