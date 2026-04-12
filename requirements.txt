@@ -1,0 +1,15 @@
+# Queue Farmer v2 — Python dependencies
+# Install with: pip install -r requirements.txt
+# After install, also run: python -m patchright install chrome
+
+# Browser automation (anti-detection Playwright fork)
+patchright
+
+# Async HTTP client/server
+aiohttp
+
+# Claude API (used by server_v2 for optional CAPTCHA solving)
+anthropic
+
+# Load .env files (optional but recommended for ANTHROPIC_API_KEY)
+python-dotenv
