@@ -305,11 +305,14 @@ _otp_resend_time:    dict[int, float] = {}     # slot_id -> timestamp of last Re
 
 # Selectors that indicate FIFA is waiting for an OTP / verification code
 _OTP_SELECTORS: tuple[str, ...] = (
+    'input[autocomplete="one-time-code"]',
     'input[name*="otp" i]',
     'input[name*="code" i]',
-    'input[autocomplete="one-time-code"]',
+    'input[id*="otp" i]',
+    'input[id*="code" i]',
     'input[placeholder*="code" i]',
     'input[placeholder*="verification" i]',
+    'input[placeholder*="sign" i]',
     'input[maxlength="6"][type="text"]',
     'input[maxlength="6"][type="number"]',
     'input[type="tel"][maxlength="6"]',
@@ -482,67 +485,76 @@ async def _auto_fill_otp(page, slot_id: int, account: str, skip_otp: str | None 
             _otp_waiting.discard(slot_id)
             return
 
-        # ── Try individual digit boxes first (FIFA uses 6×maxlength=1) ──
-        try:
-            digit_boxes = await page.query_selector_all(
-                'input[maxlength="1"]'
-            )
-            # Filter to only visible, enabled boxes
-            visible_boxes = []
-            for box in digit_boxes:
-                try:
-                    if await box.is_visible() and await box.is_enabled():
-                        visible_boxes.append(box)
-                except Exception:
-                    pass
-            if len(visible_boxes) >= 6:
-                for i, box in enumerate(visible_boxes[:6]):
-                    await box.click()
-                    await box.type(otp[i], delay=80)
-                await asyncio.sleep(0.3)
-                await page.keyboard.press("Enter")
-                _log(f"Slot #{slot_id}: OTP submitted via 6 digit boxes")
-                submitted = True
-        except Exception:
-            pass
+        # Retry filling up to 4 times — page may still be animating
+        for _attempt in range(4):
+            if page.is_closed():
+                break
 
-        # ── Fallback: single input field ──────────────────────────
-        if not submitted:
-            for sel in _OTP_SELECTORS:
-                try:
-                    el = await page.query_selector(sel)
-                    if el and await el.is_visible():
-                        await page.triple_click(sel)
-                        await page.fill(sel, otp)
-                        await asyncio.sleep(0.3)
-                        # Try clicking the submit/sign-in button first
-                        btn_clicked = False
-                        for btn_sel in (
-                            'button:has-text("SIGN IN")',
-                            'button:has-text("Sign In")',
-                            'button:has-text("Verify")',
-                            'button:has-text("Submit")',
-                            'button[type="submit"]',
-                            'input[type="submit"]',
-                        ):
-                            try:
-                                btn = await page.query_selector(btn_sel)
-                                if btn and await btn.is_visible():
-                                    await btn.click()
-                                    btn_clicked = True
-                                    break
-                            except Exception:
-                                pass
-                        if not btn_clicked:
-                            await page.keyboard.press("Enter")
-                        _log(f"Slot #{slot_id}: OTP submitted via single field ({sel})")
-                        submitted = True
-                        break
-                except Exception:
-                    continue
+            # ── Try individual digit boxes (FIFA uses 6×maxlength=1) ──
+            try:
+                digit_boxes = await page.query_selector_all('input[maxlength="1"]')
+                visible_boxes = []
+                for box in digit_boxes:
+                    try:
+                        if await box.is_visible() and await box.is_enabled():
+                            visible_boxes.append(box)
+                    except Exception:
+                        pass
+                if len(visible_boxes) >= 6:
+                    for i, box in enumerate(visible_boxes[:6]):
+                        await box.click()
+                        await box.type(otp[i], delay=80)
+                    await asyncio.sleep(0.3)
+                    await page.keyboard.press("Enter")
+                    _log(f"Slot #{slot_id}: OTP submitted via 6 digit boxes (attempt {_attempt+1})")
+                    submitted = True
+                    break
+            except Exception:
+                pass
+
+            # ── Single input field ─────────────────────────────────
+            if not submitted:
+                for sel in _OTP_SELECTORS:
+                    try:
+                        el = await page.query_selector(sel)
+                        if el and await el.is_visible():
+                            await page.triple_click(sel)
+                            await page.fill(sel, otp)
+                            await asyncio.sleep(0.3)
+                            btn_clicked = False
+                            for btn_sel in (
+                                'button:has-text("SIGN IN")',
+                                'button:has-text("Sign In")',
+                                'button:has-text("Verify")',
+                                'button:has-text("Submit")',
+                                'button[type="submit"]',
+                                'input[type="submit"]',
+                            ):
+                                try:
+                                    btn = await page.query_selector(btn_sel)
+                                    if btn and await btn.is_visible():
+                                        await btn.click()
+                                        btn_clicked = True
+                                        break
+                                except Exception:
+                                    pass
+                            if not btn_clicked:
+                                await page.keyboard.press("Enter")
+                            _log(f"Slot #{slot_id}: OTP submitted via '{sel}' (attempt {_attempt+1})")
+                            submitted = True
+                            break
+                    except Exception:
+                        continue
+
+            if submitted:
+                break
+
+            # Field not found yet — wait and retry
+            _log(f"Slot #{slot_id}: OTP field not found (attempt {_attempt+1}/4) — waiting 2s")
+            await asyncio.sleep(2)
 
         if not submitted:
-            _log(f"Slot #{slot_id}: OTP field gone before fill — may have auto-submitted")
+            _log(f"Slot #{slot_id}: OTP field not found after all attempts — may have auto-submitted")
 
         # Track submission time and the OTP used
         _last_otp_attempt[slot_id] = time.time()
