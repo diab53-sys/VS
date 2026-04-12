@@ -132,15 +132,47 @@ def _fetch_otp_sync(email_address: str, password: str) -> Optional[str]:
 
 
 def _search_and_extract(mail: imaplib.IMAP4_SSL, criteria: str) -> Optional[str]:
-    """Search inbox with criteria and extract OTP from the newest matching email."""
+    """Search inbox with criteria, sort candidates by Date header (newest first),
+    and extract OTP from the most recent matching email."""
     try:
         status, msg_ids = mail.search(None, criteria)
         if status != "OK" or not msg_ids[0]:
             return None
 
-        # IMAP IDs are in ascending order; reverse to process newest first
         ids = msg_ids[0].split()
-        for msg_id in reversed(ids[-5:]):
+        if not ids:
+            return None
+
+        # Take up to 10 candidates and sort by their Date header so we always
+        # get the absolute newest email regardless of IMAP sequence numbering.
+        candidates = []
+        for msg_id in ids[-10:]:
+            try:
+                _, hdr_data = mail.fetch(msg_id, "(BODY[HEADER.FIELDS (DATE)])")
+                date_ts = 0
+                if hdr_data and hdr_data[0]:
+                    raw_hdr = hdr_data[0][1]
+                    if isinstance(raw_hdr, bytes):
+                        raw_hdr = raw_hdr.decode("utf-8", errors="ignore")
+                    for line in raw_hdr.splitlines():
+                        if line.lower().startswith("date:"):
+                            date_str = line[5:].strip()
+                            try:
+                                import email.utils as _eu
+                                tup = _eu.parsedate(date_str)
+                                if tup:
+                                    date_ts = time.mktime(tup)
+                            except Exception:
+                                pass
+                            break
+                candidates.append((date_ts, msg_id))
+            except Exception:
+                candidates.append((0, msg_id))
+
+        # Sort newest first
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        for _, msg_id in candidates:
             try:
                 _, msg_data = mail.fetch(msg_id, "(RFC822)")
                 if not msg_data or not msg_data[0]:
