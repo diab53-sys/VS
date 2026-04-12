@@ -136,6 +136,11 @@ async def _solve_datadome_interstitial(page, slot_id: int):
     """
     Background coroutine: watch for DataDome interstitial pages and
     attempt to dismiss / solve them.  Runs until page closes.
+
+    Strategies (tried in order):
+        1. Checkbox click  (common for non-flagged IPs)
+        2. Press-and-hold  (common when IP is mildly suspicious)
+        3. Submit fallback (last resort)
     """
     while True:
         try:
@@ -143,13 +148,93 @@ async def _solve_datadome_interstitial(page, slot_id: int):
             if page.is_closed():
                 break
             url = page.url or ""
-            if "interstitial" in url or "datadome" in url.lower():
-                _log(f"Slot #{slot_id}: DataDome interstitial — attempting click-through")
+
+            is_datadome = (
+                "geo.captcha-delivery.com" in url
+                or "captcha-delivery.com" in url
+                or "interstitial" in url
+                or "datadome" in url.lower()
+            )
+            if not is_datadome:
+                continue
+
+            _log(f"Slot #{slot_id}: DataDome challenge detected at {url[:80]}")
+
+            # ── Strategy 1: Checkbox ───────────────────────────────
+            for sel in (
+                "#captcha-checkbox",
+                ".captcha__human__checkbox",
+                '[data-ddm-tag="checkpoint-checkbox"]',
+                'input[type="checkbox"]',
+            ):
                 try:
-                    await page.wait_for_selector("button", timeout=5000)
-                    await page.click("button")
+                    el = await page.wait_for_selector(sel, timeout=3000)
+                    if el:
+                        await el.click()
+                        await asyncio.sleep(3)
+                        if page.is_closed():
+                            break
+                        if "captcha-delivery.com" not in (page.url or ""):
+                            _log(f"Slot #{slot_id}: DataDome solved via checkbox")
+                            break
                 except Exception:
-                    pass
+                    continue
+            else:
+                pass  # no break — try next strategy
+
+            if page.is_closed():
+                break
+            if "captcha-delivery.com" not in (page.url or ""):
+                continue  # solved
+
+            # ── Strategy 2: Press-and-hold button ─────────────────
+            for sel in (
+                ".captcha__human__btn",
+                "#captcha-button",
+                '[data-ddm-tag="checkpoint-press"]',
+                "button",
+            ):
+                try:
+                    el = await page.query_selector(sel)
+                    if el:
+                        box = await el.bounding_box()
+                        if box:
+                            cx = box["x"] + box["width"] / 2
+                            cy = box["y"] + box["height"] / 2
+                            await page.mouse.move(cx, cy)
+                            await asyncio.sleep(0.3)
+                            await page.mouse.down()
+                            await asyncio.sleep(3.5)   # hold ~3.5 s
+                            await page.mouse.up()
+                            await asyncio.sleep(2)
+                            if page.is_closed():
+                                break
+                            if "captcha-delivery.com" not in (page.url or ""):
+                                _log(f"Slot #{slot_id}: DataDome solved via press-and-hold")
+                                break
+                except Exception:
+                    continue
+
+            if page.is_closed():
+                break
+            if "captcha-delivery.com" not in (page.url or ""):
+                continue  # solved
+
+            # ── Strategy 3: Submit button fallback ─────────────────
+            for sel in ("#captcha-submit", 'button[type="submit"]', "button"):
+                try:
+                    el = await page.query_selector(sel)
+                    if el:
+                        await el.click()
+                        await asyncio.sleep(2)
+                        _log(f"Slot #{slot_id}: DataDome fallback submit clicked")
+                        break
+                except Exception:
+                    continue
+
+            # Wait before next poll to avoid hammering
+            await asyncio.sleep(5)
+
         except asyncio.CancelledError:
             break
         except Exception:

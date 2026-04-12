@@ -2,6 +2,10 @@
 title QUEUE FARMER v2
 cd /d "%~dp0"
 
+REM ── Load .env file (sets env vars before Python starts) ─────────────────────────
+REM     Required:  ANTHROPIC_API_KEY
+REM     Captcha:   CAPMONSTER_API_KEY  (https://capmonster.cloud — ~$2/1000 solves)
+REM                TWOCAPTCHA_API_KEY  (https://2captcha.com     — ~$1/1000 solves)
 REM ── Load .env file (sets env vars before Python starts) ──
 if exist ".env" (
     for /f "usebackq eol=# tokens=1,* delims==" %%a in (".env") do (
