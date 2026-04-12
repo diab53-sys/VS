@@ -367,6 +367,34 @@ async def auto_login_monitor():
                             pass
 
                     if otp_found:
+                        # ── Detect "Invalid Code" — clear state and resend ──
+                        try:
+                            err_text = await page.evaluate(
+                                "document.body.innerText"
+                            )
+                            if "invalid code" in err_text.lower() or "invalid" in err_text.lower():
+                                if slot_id in _otp_waiting or _last_otp_attempt.get(slot_id, 0) > 0:
+                                    _log(f"Slot #{slot_id}: Invalid Code detected — requesting resend")
+                                    _otp_waiting.discard(slot_id)
+                                    _last_otp_attempt.pop(slot_id, None)
+                                    # Click "Resend Sign-In Code" button
+                                    for resend_sel in (
+                                        'button:has-text("Resend")',
+                                        'button:has-text("resend")',
+                                        'a:has-text("Resend")',
+                                        '[class*="resend"]',
+                                    ):
+                                        try:
+                                            resend_el = await page.query_selector(resend_sel)
+                                            if resend_el and await resend_el.is_visible():
+                                                await resend_el.click()
+                                                _log(f"Slot #{slot_id}: Clicked Resend — waiting for new OTP")
+                                                break
+                                        except Exception:
+                                            pass
+                        except Exception:
+                            pass
+
                         if slot_id not in _otp_waiting:
                             # Cooldown: don't re-attempt OTP within 45 s of last submit
                             since_last = time.time() - _last_otp_attempt.get(slot_id, 0)
@@ -476,9 +504,29 @@ async def _auto_fill_otp(page, slot_id: int, account: str) -> None:
                 try:
                     el = await page.query_selector(sel)
                     if el and await el.is_visible():
+                        await page.triple_click(sel)
                         await page.fill(sel, otp)
-                        await asyncio.sleep(0.5)
-                        await page.keyboard.press("Enter")
+                        await asyncio.sleep(0.3)
+                        # Try clicking the submit/sign-in button first
+                        btn_clicked = False
+                        for btn_sel in (
+                            'button:has-text("SIGN IN")',
+                            'button:has-text("Sign In")',
+                            'button:has-text("Verify")',
+                            'button:has-text("Submit")',
+                            'button[type="submit"]',
+                            'input[type="submit"]',
+                        ):
+                            try:
+                                btn = await page.query_selector(btn_sel)
+                                if btn and await btn.is_visible():
+                                    await btn.click()
+                                    btn_clicked = True
+                                    break
+                            except Exception:
+                                pass
+                        if not btn_clicked:
+                            await page.keyboard.press("Enter")
                         _log(f"Slot #{slot_id}: OTP submitted via single field ({sel})")
                         submitted = True
                         break
