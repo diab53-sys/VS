@@ -53,14 +53,17 @@ async def fetch_otp(
     password: str,
     timeout_s: int = 90,
     poll_interval_s: int = 4,
+    skip_otp: Optional[str] = None,
 ) -> Optional[str]:
-    """Async wrapper — polls IMAP until OTP found or timeout.
+    """Async wrapper — polls IMAP until a NEW OTP is found or timeout.
 
     Args:
-        email_address:   Full email (e.g. samantha5431@shereifandcompany.site)
-        password:        IMAP password for this mailbox
-        timeout_s:       Max seconds to wait for the email
-        poll_interval_s: Seconds between IMAP polls
+        email_address:   Full email address
+        password:        IMAP password
+        timeout_s:       Max seconds to wait
+        poll_interval_s: Seconds between polls
+        skip_otp:        If set, ignore any email whose OTP matches this value
+                         (used when previous OTP was rejected as invalid)
 
     Returns:
         6-digit OTP string, or None if not found within timeout.
@@ -76,6 +79,7 @@ async def fetch_otp(
                     _fetch_otp_sync,
                     email_address,
                     password,
+                    skip_otp,
                 )
                 if otp:
                     return otp
@@ -94,9 +98,11 @@ async def fetch_otp(
     return None
 
 
-def _fetch_otp_sync(email_address: str, password: str) -> Optional[str]:
-    """Single IMAP connection attempt — returns the NEWEST OTP or None."""
-    # IMAP date format for SINCE: DD-Mon-YYYY (e.g. 12-Apr-2026)
+def _fetch_otp_sync(email_address: str, password: str, skip_otp: Optional[str] = None) -> Optional[str]:
+    """Single IMAP connection attempt — returns the NEWEST OTP or None.
+    If skip_otp is set, any email whose code matches it is ignored so we
+    wait for the next fresh email from FIFA.
+    """
     today = datetime.date.today().strftime("%d-%b-%Y")
 
     try:
@@ -105,23 +111,22 @@ def _fetch_otp_sync(email_address: str, password: str) -> Optional[str]:
             mail.select("INBOX")
 
             # 1. Newest UNSEEN FIFA email received today (highest priority)
-            otp = _search_and_extract(mail, f'UNSEEN FROM "fifa.com" SINCE {today}')
+            otp = _search_and_extract(mail, f'UNSEEN FROM "fifa.com" SINCE {today}', skip_otp)
             if otp:
                 return otp
 
-            # 2. Any FIFA email today (seen or not) — _search_and_extract
-            #    always processes newest IMAP IDs first
-            otp = _search_and_extract(mail, f'FROM "fifa.com" SINCE {today}')
+            # 2. Any FIFA email today (seen or not)
+            otp = _search_and_extract(mail, f'FROM "fifa.com" SINCE {today}', skip_otp)
             if otp:
                 return otp
 
             # 3. tickets.fifa.com today
-            otp = _search_and_extract(mail, f'FROM "tickets.fifa.com" SINCE {today}')
+            otp = _search_and_extract(mail, f'FROM "tickets.fifa.com" SINCE {today}', skip_otp)
             if otp:
                 return otp
 
             # 4. Wider fallback: any UNSEEN FIFA email (previous days)
-            otp = _search_and_extract(mail, 'UNSEEN FROM "fifa.com"')
+            otp = _search_and_extract(mail, 'UNSEEN FROM "fifa.com"', skip_otp)
             if otp:
                 return otp
 
@@ -131,7 +136,7 @@ def _fetch_otp_sync(email_address: str, password: str) -> Optional[str]:
     return None
 
 
-def _search_and_extract(mail: imaplib.IMAP4_SSL, criteria: str) -> Optional[str]:
+def _search_and_extract(mail: imaplib.IMAP4_SSL, criteria: str, skip_otp: Optional[str] = None) -> Optional[str]:
     """Search inbox with criteria, sort candidates by Date header (newest first),
     and extract OTP from the most recent matching email."""
     try:
@@ -183,6 +188,9 @@ def _search_and_extract(mail: imaplib.IMAP4_SSL, criteria: str) -> Optional[str]
                 msg = email.message_from_bytes(raw)
                 otp = _extract_otp(msg)
                 if otp:
+                    if skip_otp and otp == skip_otp:
+                        # This is the already-rejected OTP — skip it
+                        continue
                     # Mark as seen so future UNSEEN searches skip it
                     try:
                         mail.store(msg_id, "+FLAGS", "\\Seen")

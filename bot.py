@@ -300,6 +300,8 @@ async def _solve_datadome_interstitial(page, slot_id: int, server_port: int = 90
 _otp_waiting:        set[int]        = set()   # slots currently running _auto_fill_otp
 _last_otp_attempt:   dict[int, float] = {}     # slot_id -> timestamp of last OTP submit
 _last_login_attempt: dict[int, float] = {}     # slot_id -> timestamp of last login submit
+_last_submitted_otp: dict[int, str]   = {}     # slot_id -> last OTP that was submitted
+_otp_resend_time:    dict[int, float] = {}     # slot_id -> timestamp of last Resend click
 
 # Selectors that indicate FIFA is waiting for an OTP / verification code
 _OTP_SELECTORS: tuple[str, ...] = (
@@ -350,6 +352,8 @@ async def auto_login_monitor():
                         _otp_waiting.discard(slot_id)
                         _last_login_attempt.pop(slot_id, None)
                         _last_otp_attempt.pop(slot_id, None)
+                        _last_submitted_otp.pop(slot_id, None)
+                        _otp_resend_time.pop(slot_id, None)
                         continue
 
                     # Resolve account early — needed by both OTP and login paths
@@ -367,28 +371,26 @@ async def auto_login_monitor():
                             pass
 
                     if otp_found:
-                        # ── Detect "Invalid Code" — clear state and resend ──
+                        # ── Detect "Invalid Code" — resend and wait ────────
                         try:
-                            err_text = await page.evaluate(
-                                "document.body.innerText"
-                            )
-                            if "invalid code" in err_text.lower() or "invalid" in err_text.lower():
-                                if slot_id in _otp_waiting or _last_otp_attempt.get(slot_id, 0) > 0:
-                                    _log(f"Slot #{slot_id}: Invalid Code detected — requesting resend")
-                                    _otp_waiting.discard(slot_id)
-                                    _last_otp_attempt.pop(slot_id, None)
-                                    # Click "Resend Sign-In Code" button
+                            err_text = await page.evaluate("document.body.innerText")
+                            if "invalid" in err_text.lower() and slot_id not in _otp_waiting:
+                                already_resent = time.time() - _otp_resend_time.get(slot_id, 0) < 30
+                                if not already_resent:
+                                    _log(f"Slot #{slot_id}: Invalid Code — clicking Resend")
                                     for resend_sel in (
                                         'button:has-text("Resend")',
-                                        'button:has-text("resend")',
                                         'a:has-text("Resend")',
                                         '[class*="resend"]',
+                                        'button:has-text("Send")',
                                     ):
                                         try:
                                             resend_el = await page.query_selector(resend_sel)
                                             if resend_el and await resend_el.is_visible():
                                                 await resend_el.click()
-                                                _log(f"Slot #{slot_id}: Clicked Resend — waiting for new OTP")
+                                                _otp_resend_time[slot_id] = time.time()
+                                                _last_otp_attempt.pop(slot_id, None)
+                                                _log(f"Slot #{slot_id}: Resend clicked — waiting 15s for new email")
                                                 break
                                         except Exception:
                                             pass
@@ -396,14 +398,20 @@ async def auto_login_monitor():
                             pass
 
                         if slot_id not in _otp_waiting:
+                            # After resend, wait 15 s for FIFA to send the new email
+                            resent_ago = time.time() - _otp_resend_time.get(slot_id, 0)
+                            if resent_ago < 15.0:
+                                continue
                             # Cooldown: don't re-attempt OTP within 45 s of last submit
                             since_last = time.time() - _last_otp_attempt.get(slot_id, 0)
                             if since_last < 45.0:
                                 continue
                             _otp_waiting.add(slot_id)
-                            _log(f"Slot #{slot_id}: OTP field detected — fetching from email")
+                            skip_otp = _last_submitted_otp.get(slot_id)
+                            _log(f"Slot #{slot_id}: OTP field detected — fetching from email"
+                                 + (f" (skipping {skip_otp})" if skip_otp else ""))
                             asyncio.create_task(
-                                _auto_fill_otp(page, slot_id, account)
+                                _auto_fill_otp(page, slot_id, account, skip_otp=skip_otp)
                             )
                         continue   # Do NOT re-submit the login form
 
@@ -452,7 +460,7 @@ async def auto_login_monitor():
 
 
 # ─── Auto OTP filler ─────────────────────────────────────────────
-async def _auto_fill_otp(page, slot_id: int, account: str) -> None:
+async def _auto_fill_otp(page, slot_id: int, account: str, skip_otp: str | None = None) -> None:
     """Fetch OTP from Titan Email and type it into the browser."""
     submitted = False
     try:
@@ -461,7 +469,7 @@ async def _auto_fill_otp(page, slot_id: int, account: str) -> None:
         email_password = os.environ.get("EMAIL_PASSWORD", FIFA_PASSWORD)
         _log(f"Slot #{slot_id}: fetching OTP for {account} via IMAP...")
 
-        otp = await fetch_otp(account, email_password, timeout_s=90)
+        otp = await fetch_otp(account, email_password, timeout_s=90, skip_otp=skip_otp)
 
         if not otp:
             _log(f"Slot #{slot_id}: OTP not found in email — manual solve needed")
@@ -536,9 +544,10 @@ async def _auto_fill_otp(page, slot_id: int, account: str) -> None:
         if not submitted:
             _log(f"Slot #{slot_id}: OTP field gone before fill — may have auto-submitted")
 
-        # Track submission time; leave slot in _otp_waiting so monitor
-        # won't immediately re-trigger — cleared when page navigates away.
+        # Track submission time and the OTP used
         _last_otp_attempt[slot_id] = time.time()
+        if submitted and otp:
+            _last_submitted_otp[slot_id] = otp
 
     except Exception as e:
         _log(f"Slot #{slot_id}: _auto_fill_otp error: {str(e)[:120]}")
