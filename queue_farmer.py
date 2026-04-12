@@ -195,7 +195,7 @@ window.__FIFA_BOT_PORT = {server_port};
 
     # Set up captcha solving
     await _setup_captcha_response_listener(page, slot.id, server_port=server_port)
-    slot.dd_task = asyncio.create_task(_solve_datadome_interstitial(page, slot.id))
+    slot.dd_task = asyncio.create_task(_solve_datadome_interstitial(page, slot.id, server_port=server_port))
     slot.status = "captcha"
     log(f"Slot #{slot.id}: In queue page, captcha solving active")
 
@@ -314,6 +314,11 @@ async def monitor_slot(slot: FarmSlot):
                             log(f"Slot #{slot.id}: Akamai solved, returning to queue")
                             await slot.page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
                             await _setup_captcha_response_listener(slot.page, slot.id, server_port=FARM_SERVER_PORT)
+                            if slot.dd_task:
+                                slot.dd_task.cancel()
+                            slot.dd_task = asyncio.create_task(
+                                _solve_datadome_interstitial(slot.page, slot.id, server_port=FARM_SERVER_PORT)
+                            )
                             await asyncio.sleep(3)
                 except Exception:
                     pass

@@ -17,10 +17,35 @@
         } catch (e) {}
     };
 
+    // Poll /solution/<slot> and apply the datadome cookie when ready.
+    var _solPollTimer = null;
+    function _startSolutionPoll() {
+        if (_solPollTimer) return;
+        _solPollTimer = setInterval(function () {
+            fetch('http://127.0.0.1:' + PORT + '/solution/' + INSTANCE)
+                .then(function (r) { return r.json(); })
+                .then(function (d) {
+                    if (d.status === 'ready' && d.cookie) {
+                        clearInterval(_solPollTimer);
+                        _solPollTimer = null;
+                        var raw = d.cookie;
+                        var val = raw.toLowerCase().indexOf('datadome=') === 0
+                            ? raw.split('=').slice(1).join('=').split(';')[0].trim()
+                            : raw.split(';')[0].trim();
+                        // Set cookie for current domain (works when not HttpOnly)
+                        document.cookie = 'datadome=' + val + '; path=/; SameSite=None; Secure';
+                        location.reload();
+                    }
+                })
+                .catch(function () {});
+        }, 3000);
+    }
+
     // Called by injector.js / page code when a captcha token is available.
     window.__qbot_captcha = function (token) {
         console.log('CAPTCHA_SOLVED:' + token);
         window.__qbot_send('/captcha', { slot_id: INSTANCE, token: token });
+        _startSolutionPoll();   // begin polling for the solved cookie
     };
 
     // Called to report queue state changes.

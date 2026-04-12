@@ -146,7 +146,7 @@ async def _setup_captcha_response_listener(page, slot_id: int, server_port: int 
 
 
 # ─── DataDome interstitial solver ─────────────────────────────────
-async def _solve_datadome_interstitial(page, slot_id: int):
+async def _solve_datadome_interstitial(page, slot_id: int, server_port: int = 9099):
     """
     Background coroutine: watch for DataDome interstitial pages and
     attempt to dismiss / solve them.  Runs until page closes.
@@ -173,6 +173,47 @@ async def _solve_datadome_interstitial(page, slot_id: int):
                 continue
 
             _log(f"Slot #{slot_id}: DataDome challenge detected at {url[:80]}")
+
+            # ── Check if solve server already has a cookie ─────────
+            try:
+                import aiohttp as _aiohttp
+                async with _aiohttp.ClientSession() as _sess:
+                    _r = await _sess.get(
+                        f"http://127.0.0.1:{server_port}/solution/{slot_id}",
+                        timeout=_aiohttp.ClientTimeout(total=3),
+                    )
+                    _sol = await _r.json()
+                    if _sol.get("status") == "ready":
+                        raw = _sol.get("cookie", "")
+                        if raw:
+                            # Parse: may be "datadome=VALUE; ..." or plain VALUE
+                            if "datadome=" in raw.lower():
+                                cname = "datadome"
+                                cval = raw.lower().split("datadome=")[1].split(";")[0].strip()
+                            else:
+                                cname = "datadome"
+                                cval = raw.split(";")[0].strip()
+                            from config import TARGET_URL
+                            from urllib.parse import urlparse as _up
+                            _host = _up(TARGET_URL).hostname or "tickets.fifa.com"
+                            for _dom in (f".{_host}", ".tickets.fifa.com"):
+                                try:
+                                    await page.context.add_cookies([{
+                                        "name": cname, "value": cval,
+                                        "domain": _dom, "path": "/",
+                                        "secure": True, "httpOnly": True,
+                                        "sameSite": "Strict",
+                                    }])
+                                except Exception:
+                                    pass
+                            _log(f"Slot #{slot_id}: DataDome cookie applied — navigating back")
+                            try:
+                                await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
+                            except Exception:
+                                pass
+                            continue
+            except Exception:
+                pass
 
             # ── Strategy 1: Checkbox ───────────────────────────────
             for sel in (
@@ -256,8 +297,9 @@ async def _solve_datadome_interstitial(page, slot_id: int):
 
 
 # ─── OTP / verification state tracking ──────────────────────────
-_otp_waiting:        set[int]        = set()   # slots waiting for OTP email
-_last_login_attempt: dict[int, float] = {}     # slot_id -> timestamp of last submit
+_otp_waiting:        set[int]        = set()   # slots currently running _auto_fill_otp
+_last_otp_attempt:   dict[int, float] = {}     # slot_id -> timestamp of last OTP submit
+_last_login_attempt: dict[int, float] = {}     # slot_id -> timestamp of last login submit
 
 # Selectors that indicate FIFA is waiting for an OTP / verification code
 _OTP_SELECTORS: tuple[str, ...] = (
@@ -307,6 +349,7 @@ async def auto_login_monitor():
                         # Left the login page — reset state
                         _otp_waiting.discard(slot_id)
                         _last_login_attempt.pop(slot_id, None)
+                        _last_otp_attempt.pop(slot_id, None)
                         continue
 
                     # Resolve account early — needed by both OTP and login paths
@@ -325,6 +368,10 @@ async def auto_login_monitor():
 
                     if otp_found:
                         if slot_id not in _otp_waiting:
+                            # Cooldown: don't re-attempt OTP within 45 s of last submit
+                            since_last = time.time() - _last_otp_attempt.get(slot_id, 0)
+                            if since_last < 45.0:
+                                continue
                             _otp_waiting.add(slot_id)
                             _log(f"Slot #{slot_id}: OTP field detected — fetching from email")
                             asyncio.create_task(
@@ -379,6 +426,7 @@ async def auto_login_monitor():
 # ─── Auto OTP filler ─────────────────────────────────────────────
 async def _auto_fill_otp(page, slot_id: int, account: str) -> None:
     """Fetch OTP from Titan Email and type it into the browser."""
+    submitted = False
     try:
         from email_reader import fetch_otp
 
@@ -392,31 +440,63 @@ async def _auto_fill_otp(page, slot_id: int, account: str) -> None:
             _otp_waiting.discard(slot_id)
             return
 
-        _log(f"Slot #{slot_id}: OTP retrieved — filling into browser")
+        _log(f"Slot #{slot_id}: OTP {otp} retrieved — filling into browser")
 
         if page.is_closed():
             _otp_waiting.discard(slot_id)
             return
 
-        # Fill OTP into whichever input field is visible
-        filled = False
-        for sel in _OTP_SELECTORS:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    await page.fill(sel, otp)
-                    await asyncio.sleep(0.5)
-                    await page.keyboard.press("Enter")
-                    _log(f"Slot #{slot_id}: OTP submitted")
-                    filled = True
-                    break
-            except Exception:
-                continue
+        # ── Try individual digit boxes first (FIFA uses 6×maxlength=1) ──
+        try:
+            digit_boxes = await page.query_selector_all(
+                'input[maxlength="1"]'
+            )
+            # Filter to only visible, enabled boxes
+            visible_boxes = []
+            for box in digit_boxes:
+                try:
+                    if await box.is_visible() and await box.is_enabled():
+                        visible_boxes.append(box)
+                except Exception:
+                    pass
+            if len(visible_boxes) >= 6:
+                for i, box in enumerate(visible_boxes[:6]):
+                    await box.click()
+                    await box.type(otp[i], delay=80)
+                await asyncio.sleep(0.3)
+                await page.keyboard.press("Enter")
+                _log(f"Slot #{slot_id}: OTP submitted via 6 digit boxes")
+                submitted = True
+        except Exception:
+            pass
 
-        if not filled:
+        # ── Fallback: single input field ──────────────────────────
+        if not submitted:
+            for sel in _OTP_SELECTORS:
+                try:
+                    el = await page.query_selector(sel)
+                    if el and await el.is_visible():
+                        await page.fill(sel, otp)
+                        await asyncio.sleep(0.5)
+                        await page.keyboard.press("Enter")
+                        _log(f"Slot #{slot_id}: OTP submitted via single field ({sel})")
+                        submitted = True
+                        break
+                except Exception:
+                    continue
+
+        if not submitted:
             _log(f"Slot #{slot_id}: OTP field gone before fill — may have auto-submitted")
+
+        # Track submission time; leave slot in _otp_waiting so monitor
+        # won't immediately re-trigger — cleared when page navigates away.
+        _last_otp_attempt[slot_id] = time.time()
 
     except Exception as e:
         _log(f"Slot #{slot_id}: _auto_fill_otp error: {str(e)[:120]}")
     finally:
-        _otp_waiting.discard(slot_id)
+        # Only clear _otp_waiting on failure so monitor doesn't re-trigger
+        # immediately. On success, auto_login_monitor clears it when the
+        # page navigates away from the login URL.
+        if not submitted:
+            _otp_waiting.discard(slot_id)
