@@ -9,6 +9,20 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILES_DIR    = os.path.join(SCRIPT_DIR, "profiles")
 INJECTOR_EXT_DIR = os.path.join(SCRIPT_DIR, "injector_ext")
 
+# ─── Load .env at import time ────────────────────────────────────
+# This ensures EMAIL_PASSWORD, ANTHROPIC_API_KEY etc. are always
+# available regardless of how the bot is started (bat, PowerShell, etc.)
+def _load_dotenv() -> None:
+    try:
+        from dotenv import load_dotenv
+        env_path = os.path.join(SCRIPT_DIR, ".env")
+        if os.path.exists(env_path):
+            load_dotenv(env_path, override=False)
+    except ImportError:
+        pass
+
+_load_dotenv()
+
 os.makedirs(PROFILES_DIR, exist_ok=True)
 os.makedirs(INJECTOR_EXT_DIR, exist_ok=True)
 

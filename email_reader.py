@@ -13,6 +13,20 @@ from __future__ import annotations
 import asyncio
 import email
 import imaplib
+import os as _os
+
+# ─── Load .env at import time ────────────────────────────────────
+def _load_dotenv() -> None:
+    try:
+        from dotenv import load_dotenv
+        _dir = _os.path.dirname(_os.path.abspath(__file__))
+        env_path = _os.path.join(_dir, ".env")
+        if _os.path.exists(env_path):
+            load_dotenv(env_path, override=False)
+    except ImportError:
+        pass
+
+_load_dotenv()
 import os
 import re
 import time
@@ -23,8 +37,14 @@ from typing import Optional
 IMAP_SERVER: str = "imap.titan.email"
 IMAP_PORT:   int = 993
 
-# Semaphore: limit concurrent IMAP connections across all slots
-_imap_semaphore = asyncio.Semaphore(5)
+# Semaphore created lazily inside the event loop (avoids DeprecationWarning)
+_imap_semaphore: Optional[asyncio.Semaphore] = None
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _imap_semaphore
+    if _imap_semaphore is None:
+        _imap_semaphore = asyncio.Semaphore(5)
+    return _imap_semaphore
 
 # Senders FIFA might use for verification emails
 _FIFA_SENDERS: tuple[str, ...] = (
@@ -56,7 +76,7 @@ async def fetch_otp(
     loop = asyncio.get_event_loop()
     deadline = time.time() + timeout_s
 
-    async with _imap_semaphore:
+    async with _get_semaphore():
         while time.time() < deadline:
             try:
                 otp = await loop.run_in_executor(
